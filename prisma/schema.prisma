@@ -1,0 +1,279 @@
+// datasource and generator setup
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  AGENT
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  AGENT
+}
+
+enum ChannelType {
+  FACEBOOK_MESSENGER
+  INSTAGRAM_DM
+  WHATSAPP_CLOUD
+  TELEGRAM
+  WEBSITE_CHAT
+  EMAIL
+  SMS
+  DISCORD
+  SLACK
+}
+
+enum ConversationStatus {
+  AI       // AI is answering automatically
+  HUMAN    // Human agent has taken over
+  CLOSED   // Conversation is completed
+}
+
+enum SenderType {
+  USER     // Human Agent
+  CUSTOMER // External client
+  AI       // Automated response
+  SYSTEM   // System event (e.g., "Agent joined")
+}
+
+enum KnowledgeStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id            String           @id @default(uuid())
+  name          String?
+  email         String           @unique
+  emailVerified DateTime?
+  image         String?
+  passwordHash  String?
+  role          UserRole         @default(AGENT)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+  
+  // Relations
+  memberships   BusinessMember[]
+  conversations Conversation[]   @relation("AgentConversations")
+  auditLogs     AuditLog[]
+}
+
+model Business {
+  id            String           @id @default(uuid())
+  name          String
+  slug          String           @unique
+  logoUrl       String?
+  timezone      String           @default("UTC")
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  // SaaS Settings
+  plan          String           @default("FREE") // FREE, GROWTH, ENTERPRISE
+  billingActive Boolean          @default(true)
+  customDomain  String?          @unique
+
+  // Relations
+  members       BusinessMember[]
+  channels      Channel[]
+  customers     Customer[]
+  conversations Conversation[]
+  prompts       Prompt[]
+  knowledgeDocs KnowledgeDocument[]
+  settings      BusinessSettings?
+  auditLogs     AuditLog[]
+}
+
+model BusinessMember {
+  id         String     @id @default(uuid())
+  businessId String
+  userId     String
+  role       MemberRole @default(AGENT)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  // Relations
+  business   Business   @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([businessId, userId])
+}
+
+model BusinessSettings {
+  id              String   @id @default(uuid())
+  businessId      String   @unique
+  businessInfo    String?  // Rich details about business for prompt injection
+  pricingDetails  String?  // Custom pricing policies
+  address         String?
+  phone           String?
+  email           String?
+  openingHours    Json?    // Structured weekly opening hours
+  defaultLanguage String   @default("bn") // default response language (Bangla)
+  supportedLangs  String[] @default(["bn", "en"])
+  
+  // Active AI Model Settings
+  activeModelProvider String @default("GEMINI") // GEMINI, OPENAI, ANTHROPIC, DEEPSEEK
+  activeModelName     String @default("gemini-1.5-flash")
+
+  // Relations
+  business        Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+}
+
+model Channel {
+  id                 String      @id @default(uuid())
+  businessId         String
+  type               ChannelType
+  name               String      // e.g., "Echo Sunnah Main Page" or "+8801700000000"
+  isActive           Boolean     @default(true)
+  
+  // Credentials (Should be encrypted in application layer before database insert)
+  providerId         String      // External ID (Page ID, Phone Number ID, Bot Token ID)
+  accessToken        String?     // Page Access Token / Cloud API Token
+  refreshToken       String?
+  tokenExpiresAt     DateTime?
+  webhookVerifyToken String?     // Secret for verifying Meta Webhooks
+
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  // Relations
+  business           Business    @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  messages           Message[]
+  prompts            Prompt[]    @relation("ChannelPrompts")
+
+  @@unique([type, providerId])
+}
+
+model Customer {
+  id          String   @id @default(uuid())
+  businessId  String
+  name        String?
+  email       String?
+  phone       String?
+  avatarUrl   String?
+  language    String?  // Detected language
+  notes       String?
+  tags        String[] @default([])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Omnichannel Identifiers
+  facebookId  String?
+  instagramId String?
+  whatsappId  String?  // E.g., phone number in international format
+  telegramId  String?
+  webWidgetId String?
+
+  // Relations
+  business      Business       @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  conversations Conversation[]
+  messages      Message[]
+
+  @@unique([businessId, email])
+  @@unique([businessId, phone])
+}
+
+model Conversation {
+  id             String             @id @default(uuid())
+  businessId     String
+  customerId     String
+  status         ConversationStatus @default(AI)
+  assignedAgentId String?
+  unreadCount    Int                @default(0)
+  isPinned       Boolean            @default(false)
+  lastMessageAt  DateTime           @default(now())
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  // Relations
+  business       Business           @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  customer       Customer           @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  assignedAgent  User?              @relation("AgentConversations", fields: [assignedAgentId], references: [id])
+  messages       Message[]
+
+  @@index([businessId, status])
+  @@index([businessId, lastMessageAt])
+}
+
+model Message {
+  id             String       @id @default(uuid())
+  conversationId String
+  channelId      String?
+  customerId     String?      // Null if sent by agent/AI
+  senderType     SenderType
+  senderId       String?      // User ID if sent by agent
+  
+  content        String
+  attachments    Json?        // List of files (URLs, types, dimensions)
+  isSeen         Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+
+  // AI Inference Metadata
+  modelUsed      String?
+  promptTokens   Int?
+  completionTokens Int?
+  cost           Float?
+
+  // Relations
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  channel        Channel?     @relation(fields: [channelId], references: [id])
+  customer       Customer?    @relation(fields: [customerId], references: [id])
+
+  @@index([conversationId, createdAt])
+}
+
+model Prompt {
+  id           String    @id @default(uuid())
+  businessId   String
+  name         String    // e.g., "Hijama Professional Agent"
+  systemPrompt String    // Full system instructions
+  greetingText String?   // Automated greeting message
+  awayMessage  String?   // Office hours away message
+  isDefault    Boolean   @default(false)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  // Relations
+  business     Business  @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  channels     Channel[] @relation("ChannelPrompts")
+}
+
+model KnowledgeDocument {
+  id          String          @id @default(uuid())
+  businessId  String
+  fileName    String
+  fileType    String          // PDF, DOCX, TXT, FAQ, URL
+  fileUrl     String?         // URL in S3/Cloud Storage
+  rawContent  String?         // Extracted text content
+  status      KnowledgeStatus @default(PENDING)
+  errorMessage String?
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  // Relations
+  business    Business        @relation(fields: [businessId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  businessId String
+  userId     String?
+  action     String   // e.g., "CHANNEL_DISCONNECT", "AI_TAKEOVER_DISABLE"
+  details    Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+
+  // Relations
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  user       User?    @relation(fields: [userId], references: [id])
+}
